@@ -1,7 +1,8 @@
-//! Бонус Д3 (неделя 1): полный малый цикл Keras -> tflite -> Rust.
+//! The full minimal Keras -> tflite -> Rust loop.
 //!
-//! Модель `dense_spike.tflite` собрана скриптом `ml/scripts/build_dense_model.py`
-//! (Dense(16, relu) -> Dense(4) -> Softmax, full-int8), вход (1, 8), выход (1, 4).
+//! The `dense_spike.tflite` model is built by the `ml/scripts/build_dense_model.py`
+//! script (Dense(16, relu) -> Dense(4) -> Softmax, full-int8), input (1, 8),
+//! output (1, 4).
 
 use microflow::model;
 use nalgebra::matrix;
