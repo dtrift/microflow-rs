@@ -29,6 +29,7 @@ libm = "0.2"
 [dev-dependencies]
 csv = "1.2"
 criterion = "0.5"
+rand = "0.9"
 
 [[bench]]
 name = "sine"
