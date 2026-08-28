@@ -1,11 +1,35 @@
 use core::array;
 
+use libm::truncf;
 use simba::scalar::SupersetOf;
 
 use crate::activation::{relu, relu6, FusedActivation};
 use crate::buffer::Buffer2D;
 use crate::quantize::Quantized;
 use crate::tensor::{Tensor2D, Tensor4D, TensorViewPadding};
+
+/// Round half to even (banker's rounding, spec §3.1).
+///
+/// `f32::round_ties_even` is std-only and the inherent float methods are
+/// sparse in this no_std core build, so the semantics are re-created from
+/// `libm::truncf` — bit-identical results, pinned by the golden fixtures.
+fn round_ties_even(value: f32) -> f32 {
+    let truncated = truncf(value);
+    let fraction = value - truncated;
+    let magnitude = fraction.abs();
+    if magnitude < 0.5 {
+        truncated
+    } else if magnitude > 0.5 {
+        truncated + fraction.signum()
+    } else {
+        // Exactly .5: pick the even neighbor (truncated is even -> stay).
+        if truncf(truncated / 2.0) * 2.0 == truncated {
+            truncated
+        } else {
+            truncated + fraction.signum()
+        }
+    }
+}
 
 /// Options of the Conv1D operator.
 pub struct Conv1DOptions {
@@ -137,7 +161,7 @@ pub fn conv_1d<
             }
             // Requantize: round-to-nearest-even, then saturate on cast
             let raw = f32::from_subset(&(accumulator + biases.buffer[(f, 0)]));
-            let requantized = (raw * multipliers[f]).round_ties_even() + output_zero_point_f32;
+            let requantized = round_ties_even(raw * multipliers[f]) + output_zero_point_f32;
             let value = T::from_superset_unchecked(&requantized);
             match options.fused_activation {
                 FusedActivation::None => value,
@@ -372,5 +396,23 @@ mod tests {
         assert_eq!(same_pad_left(2, 1, 3, 2), 1);
         assert_eq!(same_pad_left(2, 2, 3, 4), 0);
         assert_eq!(same_pad_left(5, 1, 3, 5), 1);
+    }
+
+    /// The ties-even helper matches the reference semantics on the tricky
+    /// values (exact halves round to the even neighbor, negatives included).
+    #[test]
+    fn ties_even_rounding() {
+        assert_eq!(round_ties_even(0.5), 0.0);
+        assert_eq!(round_ties_even(1.5), 2.0);
+        assert_eq!(round_ties_even(2.5), 2.0);
+        assert_eq!(round_ties_even(3.5), 4.0);
+        assert_eq!(round_ties_even(-0.5), -0.0);
+        assert_eq!(round_ties_even(-1.5), -2.0);
+        assert_eq!(round_ties_even(-2.5), -2.0);
+        assert_eq!(round_ties_even(2.4), 2.0);
+        assert_eq!(round_ties_even(2.6), 3.0);
+        assert_eq!(round_ties_even(-2.6), -3.0);
+        assert_eq!(round_ties_even(f32::INFINITY), f32::INFINITY);
+        assert!(round_ties_even(f32::NAN).is_nan());
     }
 }
