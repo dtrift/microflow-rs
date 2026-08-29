@@ -78,9 +78,19 @@ Currently, MicroFlow supports the following operators and activation functions:
 |-------------------|-----------|------------------------|
 | `FullyConnected`  | &check;   | `Tensor2D`             |
 | `Conv2D`          | &check;   | `Tensor4D`             |
+| `Conv1D`          | &check;   | `Tensor4D`             |
 | `DepthwiseConv2D` | &check;   | `Tensor4D`             |
 | `AveragePool2D`   | &check;   | `Tensor4D`             |
+| `Transpose`       | &check;   | `Tensor2D`, `Tensor4D` |
 | `Reshape`         | &check;   | `Tensor2D`, `Tensor4D` |
+| `ExpandDims`      | folded    | shape only             |
+| `Shape`/`StridedSlice`/`Pack` | folded | the Flatten chain     |
+
+`Conv1D` covers the way Keras `Conv1D` layers serialize to TFLite: a
+`CONV_2D` over a `(1, 1, T, C)` tensor (see `docs/conv1d-spec.md`). The
+"folded" operators produce no code: the compiler folds them into virtual
+reshapes at compile time, so rank-3 Keras `Conv1D` graphs build through
+`#[model]` with a 2-D user-facing buffer.
 
 | Activation Function | Quantized |
 |---------------------|-----------|
