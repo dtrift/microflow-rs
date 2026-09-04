@@ -31,6 +31,11 @@ mod tensor;
 #[path = "../flatbuffers/tflite_generated.rs"]
 #[allow(unused_imports)]
 #[allow(clippy::all)]
+// flatc-generated code: the upstream generator predates the 2024 lifetime
+// elision rules, so `Model` is written without `<'_>`. The local CI passes
+// `-A mismatched_lifetime_syntaxes` for clippy; this keeps plain local
+// `cargo build` runs (scripts/qemu-parity.sh etc.) equally quiet.
+#[allow(mismatched_lifetime_syntaxes)]
 mod tflite_flatbuffers;
 
 #[derive(StructMeta)]
