@@ -31,6 +31,11 @@ mod tensor;
 #[path = "../flatbuffers/tflite_generated.rs"]
 #[allow(unused_imports)]
 #[allow(clippy::all)]
+// flatc-generated code: the upstream generator predates the 2024 lifetime
+// elision rules, so `Model` is written without `<'_>`. The local CI passes
+// `-A mismatched_lifetime_syntaxes` for clippy; this keeps plain local
+// `cargo build` runs (scripts/qemu-parity.sh etc.) equally quiet.
+#[allow(mismatched_lifetime_syntaxes)]
 mod tflite_flatbuffers;
 
 #[derive(StructMeta)]
@@ -57,6 +62,19 @@ fn is_conv_1d(operator: Operator, tensors: Vector<ForwardsUOffset<Tensor>>) -> b
         .map(|options| options.stride_h() == 1)
         .unwrap_or(true);
     filters_height_1 && stride_h_1
+}
+
+/// Week-6 benchmark escape hatch: `MICROFLOW_CONV2D_ONLY=1` forces every
+/// 1-D convolution onto the generic `conv_2d` kernel (the pre-Conv1D
+/// "reshape trick" path) for a same-model A/B of the dedicated kernel —
+/// footprint (scripts/footprint.sh) and criterion (benches/conv1d.rs).
+///
+/// Build trap: the variable is read at macro-expansion time and cargo does
+/// NOT fingerprint proc-macro env reads — an A/B build must use its own
+/// `CARGO_TARGET_DIR` (stale artifacts otherwise silently keep the old
+/// path; the week-6 twin of the week-3 toolchain trap in ../NOTES.md).
+fn force_conv_2d() -> bool {
+    std::env::var("MICROFLOW_CONV2D_ONLY").as_deref() == Ok("1")
 }
 
 /// The entry point of MicroFlow.
@@ -205,7 +223,7 @@ pub fn model(args: TokenStream, item: TokenStream) -> TokenStream {
                 // height-1 filters — it goes through the dedicated week-2
                 // conv_1d kernel; everything else stays on the conv_2d path.
                 let one_d_input = op.input_shape.len() == 4 && op.input_shape[1] == 1;
-                if one_d_input && is_conv_1d(operator, tensors) {
+                if one_d_input && is_conv_1d(operator, tensors) && !force_conv_2d() {
                     conv_1d::parse(
                         operator,
                         tensors,
