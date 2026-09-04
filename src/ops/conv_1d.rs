@@ -130,7 +130,52 @@ pub fn conv_1d<
         let filter_scale = filters.scale.get(f).copied().unwrap_or(filters.scale[0]);
         (input.scale[0] * filter_scale) / output_scale[0]
     });
+    // Zero-point hoisting (week 6): the spec §3.1 accumulator
+    //     sum_m (x - zx)(w - zw)
+    // expands exactly (integer algebra, no rounding moves) to
+    //     sum x*w - zx * sum w - zw * sum x + M * zx * zw,
+    // with M the in-window element count. The MAC loop drops to a bare
+    // multiply-accumulate; the corrections are O(F + T) instead of
+    // O(T * F * K * C) — the golden fixtures pin the outputs bit-for-bit.
+    //
+    // Prefix sums over the kernel axis (inclusive): `prefix[f][j]` is the
+    // weight sum of kernel positions `0..=j`. The out-of-bounds positions
+    // of a Same-padding edge window form a contiguous prefix/suffix, so
+    // the in-window weight sum is a difference of two prefix lookups.
+    let filter_weight_prefix: [[i32; KERNEL]; FILTERS] = array::from_fn(|f| {
+        let mut prefix = [0i32; KERNEL];
+        let mut running = 0i32;
+        for m in 0..KERNEL {
+            running += (0..CHANS)
+                .map(|c| i32::from_subset(&filters.buffer[f][(0, m)][c]))
+                .sum::<i32>();
+            prefix[m] = running;
+        }
+        prefix
+    });
     let output = [Buffer2D::from_fn(|_, t| {
+        // In-bounds kernel window [m_lo, m_hi): out-of-bounds positions
+        // (Same padding at the edges) contribute nothing, spec §3.2 — for
+        // Valid padding this is always the full kernel.
+        let first = t * options.stride;
+        let m_lo = (pad_left.saturating_sub(first)).min(KERNEL);
+        let m_hi = (TIMESTEPS + pad_left - first).clamp(0, KERNEL);
+        // The full-window branch keeps the loop bounds compile-time constants
+        // (0..KERNEL) so LLVM unrolls the kernel axis — the dynamic range is
+        // only for Same-padding edge windows. Both branches compute the same
+        // sums; only the bounds differ.
+        let full_window = m_lo == 0 && m_hi == KERNEL;
+        let chan_sum = |index: usize| -> i32 {
+            (0..CHANS)
+                .map(|c| i32::from_subset(&input.buffer[0][(0, index)][c]))
+                .sum()
+        };
+        // Per-window input sum: shared by every filter (the zw correction).
+        let window_sum: i32 = if full_window {
+            (0..KERNEL).map(|m| chan_sum(first + m - pad_left)).sum()
+        } else {
+            (m_lo..m_hi).map(|m| chan_sum(first + m - pad_left)).sum()
+        };
         array::from_fn(|f| {
             let filter_zero_point = i32::from_subset(
                 &filters
@@ -139,26 +184,42 @@ pub fn conv_1d<
                     .copied()
                     .unwrap_or(filters.zero_point[0]),
             );
-            // Dot product of the kernel window with filter `f`
-            let mut accumulator: i32 = 0;
-            for m in 0..KERNEL {
-                let index = t * options.stride + m;
-                let index = match options.padding {
-                    // Valid windows are guaranteed to stay in bounds
-                    TensorViewPadding::Valid => Some(index),
-                    // Same windows may exceed the input on either side
-                    TensorViewPadding::Same => (index as isize - pad_left as isize).try_into().ok(),
+            // Dot product of the in-bounds kernel window with filter `f`
+            // (the full-window branch keeps static bounds for unrolling).
+            let mut dot: i32 = 0;
+            if full_window {
+                for m in 0..KERNEL {
+                    let index = first + m - pad_left;
+                    for c in 0..CHANS {
+                        let sample = i32::from_subset(&input.buffer[0][(0, index)][c]);
+                        let weight = i32::from_subset(&filters.buffer[f][(0, m)][c]);
+                        dot += sample * weight;
+                    }
                 }
-                .filter(|index| *index < TIMESTEPS);
-                let Some(index) = index else {
-                    continue;
-                };
-                for c in 0..CHANS {
-                    let sample = i32::from_subset(&input.buffer[0][(0, index)][c]);
-                    let weight = i32::from_subset(&filters.buffer[f][(0, m)][c]);
-                    accumulator += (sample - input_zero_point) * (weight - filter_zero_point);
+            } else {
+                for m in m_lo..m_hi {
+                    let index = first + m - pad_left;
+                    for c in 0..CHANS {
+                        let sample = i32::from_subset(&input.buffer[0][(0, index)][c]);
+                        let weight = i32::from_subset(&filters.buffer[f][(0, m)][c]);
+                        dot += sample * weight;
+                    }
                 }
             }
+            // The hoisted zero-point corrections (exact; see above). The
+            // in-window weight sum via the prefix lookups (0 -> empty sum).
+            let below = |j: usize| {
+                if j == 0 {
+                    0
+                } else {
+                    filter_weight_prefix[f][j - 1]
+                }
+            };
+            let in_window_weights = below(m_hi) - below(m_lo);
+            let in_window_count = ((m_hi - m_lo) * CHANS) as i32;
+            let accumulator =
+                dot - input_zero_point * in_window_weights - filter_zero_point * window_sum
+                    + in_window_count * input_zero_point * filter_zero_point;
             // Requantize: round-to-nearest-even, then saturate on cast
             let raw = f32::from_subset(&(accumulator + biases.buffer[(f, 0)]));
             let requantized = round_ties_even(raw * multipliers[f]) + output_zero_point_f32;

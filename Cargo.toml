@@ -43,6 +43,11 @@ harness = false
 name = "person_detect"
 harness = false
 
+# Week 6: Conv1D vs the reshape trick + node model latency (benches/conv1d.rs).
+[[bench]]
+name = "conv1d"
+harness = false
+
 [workspace]
 members = ["microflow-macros"]
 exclude = ["examples"]
