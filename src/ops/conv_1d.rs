@@ -145,11 +145,11 @@ pub fn conv_1d<
     let filter_weight_prefix: [[i32; KERNEL]; FILTERS] = array::from_fn(|f| {
         let mut prefix = [0i32; KERNEL];
         let mut running = 0i32;
-        for m in 0..KERNEL {
+        for (m, slot) in prefix.iter_mut().enumerate() {
             running += (0..CHANS)
                 .map(|c| i32::from_subset(&filters.buffer[f][(0, m)][c]))
                 .sum::<i32>();
-            prefix[m] = running;
+            *slot = running;
         }
         prefix
     });
